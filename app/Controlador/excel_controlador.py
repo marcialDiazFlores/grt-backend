@@ -1,18 +1,14 @@
-from fastapi import APIRouter, UploadFile, File
-from fastapi.responses import StreamingResponse
-from app.Modelo.excel_modelo import procesar_excel, leer_primera_hoja_desde_path
+from fastapi import APIRouter, UploadFile, File, BackgroundTasks
+from fastapi.responses import JSONResponse
+from app.Modelo.excel_modelo import (
+    leer_primera_hoja_desde_path
+)
 from app.Modelo.Reglas.reglas_post_nuevos_equipos import validar_grt as validar_grt_reglas
-from app.Vista.excel_vista import construir_payload
-import json
-import time
 import os
 import shutil
+import uuid
+import json
 import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-)
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -22,86 +18,50 @@ BASE_DIR = os.path.abspath(
 )
 
 TMP_PATH = os.path.join(BASE_DIR, "tmp")
+RESULTS_PATH = os.path.join(BASE_DIR, "results")
+
 os.makedirs(TMP_PATH, exist_ok=True)
+os.makedirs(RESULTS_PATH, exist_ok=True)
 
 
 # ------------------------------
-# Upload normal
+# Background task
 # ------------------------------
-@router.post("/upload-excel")
-async def upload_excel(files: list[UploadFile] = File(...)):
-    response = []
-    for file in files:
-        sheets = procesar_excel(file.file)
-        response.append(construir_payload(file.filename, sheets))
-    return response
+def procesar_validacion_grt(task_id: str, base_path: str, comp_path: str):
+    try:
+        logger.info(f"[{task_id}] Procesando GRT")
 
+        df_base = leer_primera_hoja_desde_path(base_path)
+        df_comp = leer_primera_hoja_desde_path(comp_path)
 
-# ------------------------------
-# Upload streaming
-# ------------------------------
-@router.post("/upload-excel-stream")
-async def upload_excel_stream(files: list[UploadFile] = File(...)):
+        resultado = validar_grt_reglas(df_base, df_comp)
 
-    async def event_generator():
-        for file in files:
-            sheets = procesar_excel(file.file)
-            payload = construir_payload(file.filename, sheets)
-            yield f"data: {json.dumps(payload)}\n\n"
-            time.sleep(0.1)
+        result_path = os.path.join(RESULTS_PATH, f"{task_id}.json")
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump(resultado, f, ensure_ascii=False)
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream"
-    )
+        logger.info(f"[{task_id}] Procesamiento terminado")
+
+    except Exception as e:
+        logger.exception(f"[{task_id}] Error")
+        error_path = os.path.join(RESULTS_PATH, f"{task_id}.json")
+        with open(error_path, "w") as f:
+            json.dump({"error": str(e)}, f)
 
 
 # ------------------------------
-# Validar GRT
+# POST: iniciar validación
 # ------------------------------
 @router.post("/validar-grt")
-async def validar_grt(files: list[UploadFile] = File(...)):
-    """
-    Endpoint para validar GRT.
-    Valida las siguientes reglas: 
-    
-    # Regla 0:
-
-    # Precio_base * 1.19 = Precio_comparación, donde el precio base es el precio de la columna Full Price de la primera planilla, y precio comparación es el precio de la columna valor full de la segunda planilla
-
-    # Regla 1:
-
-    # Si el valor en la columna Make no es Apple y el valor de Full Price con IVA es menor o igual a 250000, el valor de Equipment Rank Value debe ser 1.
-
-    # Regla 2:
-
-    # Si el valor en la columna Make no es Apple y el valor de Full Price con IVA es mayor a 250000, el valor de Equipment Rank Value debe ser 3.
-
-    # Regla 3: 
-
-    # Si el valor en la columna Make es Apple, entonces Equipment Rank Value debe ser 2.
-
-    # Regla 4:
-
-    # Si el valor en la columna Equipment Rank Value es 4, entonces Equipment Classification debe ser "MDM".
-
-    # Regla 5:
-
-    # Si el valor en la columna Equipment Classification es "MDM", entonces Use Category debe ser "DATOS"
-
-    # Regla 6:
-
-    # El nombre, color y modelo del equipo debe ser menor o igual a 30 caracteres.
-
-    # Regla 7:
-
-    # Los nombres, colores y modelos no deben contener caracteres no válidos, donde los caracteres inválidos son / * - # , . ( ) y otros símbolos especiales, se permiten: letras (incluyendo acentos), números y espacios.
-    """
+async def validar_grt(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...)
+):
     archivo_base, archivo_comp = files
+    task_id = str(uuid.uuid4())
 
-    # Guardar archivos temporalmente
-    base_path = os.path.join(TMP_PATH, archivo_base.filename)
-    comp_path = os.path.join(TMP_PATH, archivo_comp.filename)
+    base_path = os.path.join(TMP_PATH, f"{task_id}_base.xlsx")
+    comp_path = os.path.join(TMP_PATH, f"{task_id}_comp.xlsx")
 
     with open(base_path, "wb") as buffer:
         shutil.copyfileobj(archivo_base.file, buffer)
@@ -109,12 +69,36 @@ async def validar_grt(files: list[UploadFile] = File(...)):
     with open(comp_path, "wb") as buffer:
         shutil.copyfileobj(archivo_comp.file, buffer)
 
-    # Leer dataframes
-    df_base = leer_primera_hoja_desde_path(base_path)
-    df_comp = leer_primera_hoja_desde_path(comp_path)
+    background_tasks.add_task(
+        procesar_validacion_grt,
+        task_id,
+        base_path,
+        comp_path
+    )
 
-    # Ejecutar lógica de negocio
-    resultado = validar_grt_reglas(df_base, df_comp)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "task_id": task_id,
+            "status": "processing"
+        }
+    )
 
-    logger.info(f"Resultado comparar-grt: {resultado}")
-    return resultado
+
+# ------------------------------
+# GET: consultar resultado
+# ------------------------------
+@router.get("/validar-grt/{task_id}")
+async def obtener_resultado(task_id: str):
+    result_path = os.path.join(RESULTS_PATH, f"{task_id}.json")
+
+    if not os.path.exists(result_path):
+        return {"status": "processing"}
+
+    with open(result_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return {
+        "status": "done",
+        "data": data
+    }
