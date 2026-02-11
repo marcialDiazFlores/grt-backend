@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from Controlador.excel_controlador import router
+from app.Controlador.excel_controlador import router
 
 # Crea la aplicación FastAPI
 app = FastAPI()
