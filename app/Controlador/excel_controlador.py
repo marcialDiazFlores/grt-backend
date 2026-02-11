@@ -1,8 +1,8 @@
 from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import StreamingResponse
-from Modelo.excel_modelo import procesar_excel, leer_primera_hoja_desde_path
-from Modelo.Reglas.reglas_post_nuevos_equipos import validar_grt as validar_grt_reglas
-from Vista.excel_vista import construir_payload
+from app.Modelo.excel_modelo import procesar_excel, leer_primera_hoja_desde_path
+from app.Modelo.Reglas.reglas_post_nuevos_equipos import validar_grt as validar_grt_reglas
+from app.Vista.excel_vista import construir_payload
 import json
 import time
 import os
